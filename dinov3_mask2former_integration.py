@@ -85,21 +85,74 @@ class DINOv3AdapterBackboneConfig(PretrainedConfig, BackboneConfigMixin):
 class DINOv3CompatibilityWrapper:
     """
     Wrapper to make DINOv3 compatible with DINOv3_Adapter which expects DINOv2-style attributes.
+    Implements get_intermediate_layers() to extract features at specific transformer layers.
     """
     def __init__(self, dinov3_model):
         self.model = dinov3_model
-        
+
         # Add DINOv2-style attributes expected by the adapter
         self.embed_dim = dinov3_model.config.hidden_size  # 1024 for ViT-Large
         self.patch_size = dinov3_model.config.patch_size  # 16
         self.num_layers = dinov3_model.config.num_hidden_layers  # 24
-        
-        # Forward all other attributes to the wrapped model
+
     def __getattr__(self, name):
         return getattr(self.model, name)
-    
+
     def __call__(self, *args, **kwargs):
         return self.model(*args, **kwargs)
+
+    def get_intermediate_layers(self, x, n, return_class_token=True):
+        """
+        Extract intermediate layer features from DINOv3.
+
+        This mimics the DINOv2 torch.hub API for compatibility with DINOv3_Adapter.
+
+        Args:
+            x: Input tensor of shape (B, C, H, W)
+            n: List of layer indices to extract features from (e.g., [4, 11, 17, 23])
+            return_class_token: If True, return (patch_tokens, cls_token) tuples
+
+        Returns:
+            List of tuples (patch_tokens, cls_token) for each requested layer
+        """
+        # Forward through the model with output_hidden_states=True
+        outputs = self.model(x, output_hidden_states=True)
+
+        # hidden_states is a tuple of (embedding_output, layer_1, layer_2, ..., layer_N)
+        # Index 0 is the embedding output, indices 1-N are the transformer layer outputs
+        hidden_states = outputs.hidden_states
+
+        results = []
+        for layer_idx in n:
+            # hidden_states[0] is embedding, hidden_states[1] is layer 0, etc.
+            # So layer_idx=4 means we want hidden_states[5] (after 4 transformer layers)
+            # But HuggingFace uses 0-indexed layers, so layer 4 = hidden_states[4+1] = hidden_states[5]
+            # Actually, let's check: hidden_states has len = num_layers + 1
+            # hidden_states[0] = embeddings
+            # hidden_states[i] = output after layer i-1 (0-indexed)
+            # So to get output after layer_idx (0-indexed), we need hidden_states[layer_idx + 1]
+            state = hidden_states[layer_idx + 1]  # (B, num_tokens, hidden_size)
+
+            # DINOv3 token structure: [CLS, patch_1, ..., patch_N, reg_1, ..., reg_4]
+            # For DINOv3-ViT-L/16: CLS at 0, patches at 1:N+1, registers at N+1:N+5
+            # The adapter expects: patch_tokens (without CLS/registers), cls_token
+
+            cls_token = state[:, 0, :]  # (B, hidden_size) - squeezed to match DINOv2 API
+
+            # Remove CLS (index 0) and register tokens (last 4 tokens)
+            # Registers are at the end for DINOv3
+            num_register_tokens = getattr(self.model.config, 'num_register_tokens', 4)
+            if num_register_tokens > 0:
+                patch_tokens = state[:, 1:-num_register_tokens, :]  # (B, num_patches, hidden_size)
+            else:
+                patch_tokens = state[:, 1:, :]  # (B, num_patches, hidden_size)
+
+            if return_class_token:
+                results.append((patch_tokens, cls_token))
+            else:
+                results.append(patch_tokens)
+
+        return results
 
 
 class DINOv3AdapterBackbone(nn.Module, BackboneMixin):
@@ -278,9 +331,12 @@ def create_dinov3_mask2former(
 
     # --- ViT-Adapter (randomly initialized) ---
     print("\n🔧 VIT-ADAPTER:")
-    adapter_params = _count_params(custom_backbone.adapter)
-    # Subtract backbone params that are inside adapter
-    adapter_only_params = adapter_params - dinov3_params
+    # Count only the adapter's own parameters (not the backbone)
+    # The backbone is stored as a non-Module wrapper, so we need to count adapter modules only
+    adapter_only_params = 0
+    for name, module in custom_backbone.adapter.named_modules():
+        if name and not name.startswith('backbone'):
+            adapter_only_params += sum(p.numel() for p in module.parameters(recurse=False))
     pretrained, random = _log_weight_status(
         "ViT-Adapter layers",
         adapter_only_params,
