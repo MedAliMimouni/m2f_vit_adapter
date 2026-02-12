@@ -9,10 +9,11 @@ Key differences:
 - Embedding dim: 1024 (ViT-Large)
 """
 
+import os
 import torch
 import torch.nn as nn
 from transformers import (
-    Mask2FormerForUniversalSegmentation, 
+    Mask2FormerForUniversalSegmentation,
     Mask2FormerConfig,
     AutoImageProcessor,
     AutoModel,
@@ -115,7 +116,7 @@ class DINOv3AdapterBackbone(nn.Module, BackboneMixin):
         dinov3_model = AutoModel.from_pretrained(
             config.dinov3_model_name,
             token=HF_TOKEN,
-            device_map="auto"
+            trust_remote_code=True,
         )
         
         # Wrap DINOv3 for compatibility with adapter
@@ -172,6 +173,25 @@ class DINOv3AdapterBackbone(nn.Module, BackboneMixin):
         )
 
 
+def _count_params(module):
+    """Count total parameters in a module."""
+    return sum(p.numel() for p in module.parameters())
+
+
+def _log_weight_status(component_name, total_params, pretrained_params, random_params):
+    """Log the weight status for a component."""
+    pretrained_pct = (pretrained_params / total_params * 100) if total_params > 0 else 0
+    random_pct = (random_params / total_params * 100) if total_params > 0 else 0
+
+    status = "✅ PRETRAINED" if pretrained_pct > 95 else "⚠️ PARTIAL" if pretrained_pct > 0 else "❌ RANDOM"
+
+    print(f"  {component_name}:")
+    print(f"    Total params:      {total_params:>12,}")
+    print(f"    Pretrained:        {pretrained_params:>12,} ({pretrained_pct:5.1f}%) {status}")
+    print(f"    Random/Reinit:     {random_params:>12,} ({random_pct:5.1f}%)")
+    return pretrained_params, random_params
+
+
 def create_dinov3_mask2former(
     dinov3_model_name="facebook/dinov3-vitl16-pretrain-sat493m",
     interaction_indexes=[4, 11, 17, 23],  # For ViT-Large (24 layers)
@@ -182,7 +202,7 @@ def create_dinov3_mask2former(
 ):
     """
     Create a Mask2Former model with DINOv3-ViT-L/16 + DINOv3_Adapter backbone.
-    
+
     Args:
         dinov3_model_name: DINOv3 model variant
         interaction_indexes: Interaction layers for adapter (for 24-layer ViT-Large)
@@ -190,55 +210,181 @@ def create_dinov3_mask2former(
         mask2former_config_name: Base Mask2Former config to modify
         num_classes: Number of segmentation classes
         **kwargs: Additional arguments for adapter
-        
+
     Returns:
         tuple: (model, processor, backbone_config)
     """
-    
-    # 1. Create backbone configuration
+
+    print("\n" + "=" * 70)
+    print("🏗️  CREATING DINOv3 + ViT-Adapter + Mask2Former MODEL")
+    print("=" * 70)
+
+    # =========================================================================
+    # STEP 1: Create backbone configuration
+    # =========================================================================
     backbone_config = DINOv3AdapterBackboneConfig(
         dinov3_model_name=dinov3_model_name,
         interaction_indexes=interaction_indexes,
         pretrain_size=pretrain_size,
         **kwargs
     )
-    
-    # 2. Load base Mask2Former configuration
+
+    # =========================================================================
+    # STEP 2: Load PRETRAINED Mask2Former (not from config!)
+    # =========================================================================
+    print("\n📦 Loading Mask2Former with PRETRAINED weights...")
+    print(f"   Base model: {mask2former_config_name}")
+    print(f"   Target classes: {num_classes}")
+
+    # Load base config and modify for our needs
     base_config = Mask2FormerConfig.from_pretrained(mask2former_config_name)
-    
-    # 3. Create a new config by copying the base config and modifying what we need
-    mask2former_config_dict = base_config.to_dict()
-    
-    # Update config for our backbone
-    mask2former_config_dict.update({
-        "feature_strides": [4, 8, 16, 32],  # Match our adapter output
-        "num_labels": num_classes,
-        # Remove backbone_config to avoid CONFIG_MAPPING lookup
-        "backbone_config": None,
-        "backbone": None,
-        "use_pretrained_backbone": False,
-    })
-    
-    # Create the final config without backbone_config to avoid the lookup error
-    mask2former_config = Mask2FormerConfig(**mask2former_config_dict)
-    
-    # 4. Create Mask2Former model with custom backbone
-    model = Mask2FormerForUniversalSegmentation(mask2former_config)
-    
-    # Replace the backbone with our custom one
+    base_config.num_labels = num_classes
+
+    # Use from_pretrained to get pretrained weights!
+    # ignore_mismatched_sizes=True allows different num_classes
+    model = Mask2FormerForUniversalSegmentation.from_pretrained(
+        mask2former_config_name,
+        config=base_config,
+        ignore_mismatched_sizes=True,
+    )
+
+    # =========================================================================
+    # STEP 3: Create custom backbone with PRETRAINED DINOv3
+    # =========================================================================
+    print("\n📦 Creating DINOv3 + ViT-Adapter backbone...")
     custom_backbone = DINOv3AdapterBackbone(backbone_config)
-    model.model.backbone = custom_backbone
-    
-    # 5. Get processor and configure it for the correct number of classes
-    # For DINOv3 with patch size 16, optimal sizes are multiples of 16
+
+    # =========================================================================
+    # STEP 4: Log weight status BEFORE replacing backbone
+    # =========================================================================
+    print("\n" + "-" * 70)
+    print("📊 WEIGHT STATUS SUMMARY")
+    print("-" * 70)
+
+    total_pretrained = 0
+    total_random = 0
+
+    # --- DINOv3 Backbone (inside our custom backbone) ---
+    print("\n🧠 DINOv3-ViT-L/16 BACKBONE:")
+    dinov3_params = _count_params(custom_backbone.dinov3_backbone.model)
+    pretrained, random = _log_weight_status(
+        "DINOv3-ViT-L/16 (frozen)",
+        dinov3_params,
+        dinov3_params,  # All pretrained from HuggingFace
+        0
+    )
+    total_pretrained += pretrained
+    total_random += random
+
+    # --- ViT-Adapter (randomly initialized) ---
+    print("\n🔧 VIT-ADAPTER:")
+    adapter_params = _count_params(custom_backbone.adapter)
+    # Subtract backbone params that are inside adapter
+    adapter_only_params = adapter_params - dinov3_params
+    pretrained, random = _log_weight_status(
+        "ViT-Adapter layers",
+        adapter_only_params,
+        0,  # All random - adapter is not pretrained
+        adapter_only_params
+    )
+    total_pretrained += pretrained
+    total_random += random
+
+    # --- Mask2Former Pixel Decoder ---
+    print("\n🎨 MASK2FORMER PIXEL DECODER:")
+    pixel_decoder = model.model.pixel_level_module.decoder
+    pixel_decoder_params = _count_params(pixel_decoder)
+    pretrained, random = _log_weight_status(
+        "Pixel Decoder (FPN + layers)",
+        pixel_decoder_params,
+        pixel_decoder_params,  # All pretrained from COCO
+        0
+    )
+    total_pretrained += pretrained
+    total_random += random
+
+    # --- Mask2Former Transformer Decoder ---
+    print("\n🔮 MASK2FORMER TRANSFORMER DECODER:")
+    transformer_module = model.model.transformer_module
+    transformer_params = _count_params(transformer_module)
+    pretrained, random = _log_weight_status(
+        "Transformer Decoder",
+        transformer_params,
+        transformer_params,  # All pretrained from COCO
+        0
+    )
+    total_pretrained += pretrained
+    total_random += random
+
+    # --- Class Predictor (reinitialized due to different num_classes) ---
+    print("\n🏷️  CLASS PREDICTOR:")
+    class_predictor = model.class_predictor
+    class_predictor_params = _count_params(class_predictor)
+    pretrained, random = _log_weight_status(
+        f"Class Predictor ({num_classes} classes)",
+        class_predictor_params,
+        0,  # Reinitialized due to num_classes mismatch
+        class_predictor_params
+    )
+    total_pretrained += pretrained
+    total_random += random
+
+    # --- Swin Backbone (will be REPLACED) ---
+    print("\n🔄 SWIN BACKBONE (to be replaced):")
+    swin_encoder = model.model.pixel_level_module.encoder
+    swin_params = _count_params(swin_encoder)
+    print(f"  Swin-Base backbone:")
+    print(f"    Total params:      {swin_params:>12,}")
+    print(f"    Status:            ❌ WILL BE REPLACED by DINOv3 + Adapter")
+
+    # =========================================================================
+    # STEP 5: Replace backbone
+    # =========================================================================
+    print("\n" + "-" * 70)
+    print("🔄 REPLACING BACKBONE...")
+    print("-" * 70)
+
+    # Replace the Swin encoder with our DINOv3 + Adapter backbone
+    model.model.pixel_level_module.encoder = custom_backbone
+    print("✅ Replaced pixel_level_module.encoder with DINOv3 + ViT-Adapter")
+
+    # =========================================================================
+    # STEP 6: Final summary
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("📊 FINAL WEIGHT SUMMARY")
+    print("=" * 70)
+
+    total_model_params = _count_params(model)
+    print(f"\n  Total model parameters:     {total_model_params:>12,}")
+    print(f"  ├── Pretrained:             {total_pretrained:>12,} ({total_pretrained/total_model_params*100:.1f}%)")
+    print(f"  └── Random/Reinitialized:   {total_random:>12,} ({total_random/total_model_params*100:.1f}%)")
+
+    print("\n  Component breakdown:")
+    print(f"    • DINOv3 backbone:        {dinov3_params:>12,} (pretrained, frozen)")
+    print(f"    • ViT-Adapter:            {adapter_only_params:>12,} (random, trainable)")
+    print(f"    • M2F Pixel Decoder:      {pixel_decoder_params:>12,} (pretrained, trainable)")
+    print(f"    • M2F Transformer:        {transformer_params:>12,} (pretrained, trainable)")
+    print(f"    • Class Predictor:        {class_predictor_params:>12,} (reinitialized, trainable)")
+
+    print("\n⚠️  NOTE: Pixel decoder input projections expect Swin channel dims")
+    print("   (128, 256, 512, 1024) but adapter outputs 1024 at all scales.")
+    print("   This will cause dimension mismatch at forward pass!")
+    print("   TODO: Add projection layers to match Swin channel dimensions.")
+
+    print("=" * 70 + "\n")
+
+    # =========================================================================
+    # STEP 7: Get processor
+    # =========================================================================
     processor = AutoImageProcessor.from_pretrained(
         mask2former_config_name,
         num_labels=num_classes,
         id2label={i: str(i) for i in range(num_classes)},
         label2id={str(i): i for i in range(num_classes)},
-        size={"height": 224, "width": 224}  # Start with 224x224 (14x14 patches)
+        size={"height": 224, "width": 224}
     )
-    
+
     return model, processor, backbone_config
 
 

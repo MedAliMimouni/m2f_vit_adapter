@@ -1,6 +1,6 @@
 defaults:
   - model: dinov3_mask2former
-  - data: loveda
+  - data: loveda720
   - training: default
   - logging: default
   - _self_
