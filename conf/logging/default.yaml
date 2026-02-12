@@ -1,0 +1,29 @@
+# @package _global_
+logging:
+  # Checkpoint configuration
+  checkpoint:
+    monitor: "val_mean_iou_no_bg"  # Monitor semantic-only performance
+    mode: "max"
+    save_top_k: 3
+    filename: "dinov3-mask2former-loveda-{epoch:02d}-{val_mean_iou_no_bg:.2f}"
+    auto_insert_metric_name: false
+    
+  # Logger configuration
+  loggers:
+    tensorboard:
+      enabled: true
+      name: "dinov3_mask2former_loveda"
+      
+    csv:
+      enabled: true
+      name: "dinov3_mask2former_loveda_csv"
+  
+  # Training progress
+  log_every_n_steps: 10
+  
+  # Results saving
+  save_results: true
+  results_filename: "training_results.json"
+  
+  # Config backup
+  save_config: true  # Save config.yaml in run directory 

@@ -1,0 +1,25 @@
+defaults:
+  - model: dinov3_mask2former
+  - data: loveda
+  - training: default
+  - logging: default
+  - _self_
+
+# Run configuration
+run:
+  name: "dinov3_mask2former_loveda"
+  description: "DINOv3+Mask2Former training on LoveDA dataset"
+  
+# Output directory configuration
+output:
+  base_dir: "runs"
+  # Directory name format: YYYY-MM-DD_HH-MM-SS_{image_size}
+  include_date: true
+  include_image_size: true
+  
+# Hydra configuration
+hydra:
+  run:
+    dir: ${output.base_dir}/${now:%Y-%m-%d_%H-%M-%S}_${data.image_size}x${data.image_size}
+  job:
+    chdir: true 

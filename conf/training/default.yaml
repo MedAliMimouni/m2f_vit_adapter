@@ -1,0 +1,35 @@
+# @package _global_
+training:
+  # Training parameters
+  max_epochs: 50
+  learning_rate: 5e-5
+  
+  # Optimizer configuration
+  optimizer:
+    name: "AdamW"
+    weight_decay: 0.01
+  
+  # Learning rate scheduler
+  scheduler:
+    name: "ReduceLROnPlateau"
+    mode: "max"
+    factor: 0.5
+    patience: 5
+    monitor: "val_mean_iou_no_bg"  # Monitor semantic-only performance
+  
+  # Precision settings
+  precision: "medium"  # For modern GPUs
+  
+  # Validation settings
+  validation:
+    # Dual metrics: all classes vs semantic-only
+    metrics:
+      include_background: true   # val_mean_iou (all 7 classes)
+      exclude_background: true   # val_mean_iou_no_bg (6 semantic classes)
+    
+    # Primary metric for model selection
+    primary_metric: "val_mean_iou_no_bg"
+  
+  # Training behavior
+  gradient_clipping: null
+  accumulate_grad_batches: 1 

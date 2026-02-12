@@ -1,0 +1,33 @@
+# @package _global_
+data:
+  # Dataset configuration
+  name: "LoveDA"
+  dataset_root: "/mnt/biontech/temp_mimouni/LoveDA/"
+  
+  # Image processing
+  image_size: 720  # Input size for the processor
+  
+  # DataLoader configuration
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  
+  # Class information
+  class_names: 
+    - "background"
+    - "building" 
+    - "road"
+    - "water"
+    - "barren"
+    - "forest"
+    - "agriculture"
+  
+  class_colors:
+    - [128, 128, 128]  # background: gray
+    - [255, 0, 0]      # building: red
+    - [0, 255, 0]      # road: green
+    - [0, 0, 255]      # water: blue
+    - [255, 255, 0]    # barren: yellow
+    - [255, 0, 255]    # forest: magenta
+    - [0, 255, 255]    # agriculture: cyan
+ 

@@ -1,0 +1,1 @@
+# DINOv2 Mask2Former Integration Package 

@@ -1,0 +1,19 @@
+# @package _global_
+model:
+  # Model architecture
+  name: "DINOv3-ViT-L/16 + Mask2Former"
+  backbone: "facebook/dinov3-vitl16-pretrain-sat493m"
+  
+  # DINOv3 specific parameters
+  dinov3_model_name: "facebook/dinov3-vitl16-pretrain-sat493m"
+  interaction_indexes: [4, 11, 17, 23]  # For ViT-Large (24 layers)
+  
+  # Segmentation parameters
+  num_classes: 7  # LoveDA classes (excluding no-data)
+  
+  # Processor configuration
+  processor:
+    name: "facebook/mask2former-swin-base-coco-panoptic"
+    do_reduce_labels: true
+    ignore_index: 0  # Original no-data value
+    # Note: Processor will output 736x736 regardless of requested size 

@@ -1,0 +1,12 @@
+MODEL EVALUATION SUMMARY
+========================================
+
+Checkpoint: checkpoints/dinov2-mask2former-loveda-epoch=48-val_mean_iou=0.29.ckpt
+Dataset: ../../LoveDA/
+
+OVERALL METRICS:
+--------------------
+Mean IoU:     0.2711
+Accuracy:     0.4350
+F1-Score:     0.3934
+Samples:      33541919
